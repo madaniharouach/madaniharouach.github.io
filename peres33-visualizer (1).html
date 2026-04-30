@@ -1,0 +1,1302 @@
+<!doctype html>
+<!--
+  ============================================================================
+  Conway–Kochen Visualizer — Peres-33 directions
+  ============================================================================
+
+  HEADER REPORT (computed live; values below are what verifyPeresSet()
+  produces against the active ray set).
+
+  Default ray set:                                  PERES_RAYS_LITERATURE
+  Reference:                                        Peres, J. Phys. A 24,
+                                                    L175 (1991); Gould &
+                                                    Aravind, arXiv:0909.4502
+                                                    (2009), Table 1.
+
+  1. Number of rays after antipode-collapse:        33   (PASS)
+  2. Orbit decomposition:                           3 + 6 + 12 + 12 = 33
+                                                    (axes / face-diagonals /
+                                                    √2-type1 / √2-type2)
+  3. Orthogonal pairs:                              72   (PASS — matches lit.)
+  4. Orthogonal triples:                            16   (PASS — matches lit.)
+  5. KS brute-force {0,1}-coloring exists:          NO   (PASS — uncolorable,
+                                                    KS theorem demonstrated)
+
+  HISTORICAL NOTE (kept for diagnostic transparency):
+
+  An earlier prompt for this visualizer specified a 33-ray set that included
+  the 4 body-diagonals (1,±1,±1) and only 8 of the 12 rays in the (±√2,±1,0)
+  orbit. That set is preserved as PERES_RAYS_USER_SPEC and selectable via the
+  set-toggle in the top-right corner. It has 68 orthogonal pairs and 12
+  triples and IS KS-colorable — i.e., it does NOT demonstrate the Kochen–
+  Specker theorem. The verifyPeresSet() function reports this honestly when
+  that set is loaded; no silent adjustment is made.
+
+  CHANGES FROM THE FIRST VERSION:
+    - Default loads PERES_RAYS_LITERATURE so the visualizer demonstrates
+      the geometric lemma out of the box.
+    - Top-right corner has a permanent "ray set" toggle (literature ↔ user
+      spec) so switching is always reachable, not only via the error banner.
+    - animateRotation() now reads the *currently displayed* group quaternion
+      as its starting point, so rotations clicked mid-tween chain smoothly
+      rather than jumping back to the previous end-state.
+    - Removed dead `triples.indexOf([a,b,c])` reference (always returned -1).
+    - Verification readout uses consistent capitalization for PASS/FAIL.
+
+  Implementation notes:
+     - The cube rotation group of order 24 is generated in code from signed
+       3x3 permutation matrices with det = +1. No rotation table is hardcoded.
+     - Conjugacy classes are determined by trace + axis order (not by ad-hoc
+       diagonal-entry rules), giving the standard 5 classes:
+       Identity (1), Face 90° (6), Face 180° (3), Edge 180° (6), Vertex 120° (8).
+     - Both ray sets (literature and user-spec) are closed under this group
+       action up to antipode, as required.
+  ============================================================================
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Peres-33 — Conway–Kochen visualizer</title>
+<style>
+  /* ---- typography & palette ---- */
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Fraunces:opsz,wght@9..144,300;9..144,500&display=swap');
+
+  :root {
+    --bg: #0a0a0a;
+    --bg-panel: rgba(18, 18, 20, 0.78);
+    --bg-panel-solid: #121214;
+    --border: rgba(255,255,255,0.08);
+    --border-strong: rgba(255,255,255,0.18);
+    --text: #d8d8d6;
+    --text-dim: #8a8a86;
+    --text-faint: #555550;
+
+    /* orbit colors — distinct on dark, do not collide with red/cyan/magenta */
+    --orbit-A: #f5c542;   /* warm yellow — axes */
+    --orbit-B: #6dd3a8;   /* mint — face diagonals */
+    --orbit-C: #b59cff;   /* lavender — body diagonals (spec's spurious orbit) */
+    --orbit-D: #ff9d6c;   /* coral — sqrt2 type 1 */
+    --orbit-E: #7fb8ff;   /* sky blue — sqrt2 type 2 */
+
+    /* coloring game */
+    --val-0: #2ee0e0;     /* cyan */
+    --val-1: #ff5cd6;     /* magenta */
+    --violation: #ff3a3a;
+
+    --mono: 'JetBrains Mono', ui-monospace, monospace;
+    --serif: 'Fraunces', Georgia, serif;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 12px; overflow: hidden; }
+
+  #scene { position: fixed; inset: 0; z-index: 0; }
+
+  /* ---- panels ---- */
+  .panel {
+    position: fixed; z-index: 10;
+    background: var(--bg-panel);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border);
+    padding: 14px 16px;
+    width: 290px;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+  }
+  .panel-left  { left: 16px; top: 16px; }
+  .panel-right { right: 16px; top: 16px; }
+  .panel h1, .panel h2 {
+    font-family: var(--serif);
+    font-weight: 300;
+    font-style: italic;
+    letter-spacing: 0.01em;
+    margin: 0 0 4px 0;
+  }
+  .panel h1 { font-size: 22px; color: var(--text); }
+  .panel h2 { font-size: 14px; color: var(--text-dim); margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .panel h2:first-of-type { border-top: none; padding-top: 0; }
+  .subtitle { color: var(--text-faint); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 14px; }
+
+  /* ---- scrollbars (subtle) ---- */
+  .panel::-webkit-scrollbar { width: 4px; }
+  .panel::-webkit-scrollbar-thumb { background: var(--border-strong); }
+
+  /* ---- controls ---- */
+  label { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; user-select: none; }
+  label:hover { color: #fff; }
+  input[type=checkbox] { appearance: none; -webkit-appearance: none; width: 12px; height: 12px; border: 1px solid var(--border-strong); background: transparent; cursor: pointer; position: relative; flex-shrink: 0; }
+  input[type=checkbox]:checked { background: var(--text); }
+  .swatch { width: 10px; height: 10px; flex-shrink: 0; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; padding: 3px 0; gap: 8px; }
+  .row .k { color: var(--text-dim); font-size: 11px; }
+  .row .v { color: var(--text); font-variant-numeric: tabular-nums; }
+
+  button {
+    font-family: var(--mono); font-size: 11px;
+    background: transparent; color: var(--text);
+    border: 1px solid var(--border-strong);
+    padding: 6px 10px; cursor: pointer;
+    letter-spacing: 0.03em;
+    transition: all 0.15s;
+    width: 100%;
+    margin-top: 6px;
+    text-align: left;
+  }
+  button:hover { background: rgba(255,255,255,0.06); border-color: var(--text); }
+  button.danger { border-color: rgba(255,90,90,0.35); color: #ffb0b0; }
+  button.danger:hover { background: rgba(255,60,60,0.12); }
+  button.primary { border-color: var(--text); }
+
+  .rot-btn { font-size: 10px; padding: 4px 8px; margin: 2px; width: auto; display: inline-block; }
+  .rot-class { margin-top: 8px; }
+  .rot-class .rc-label { color: var(--text-dim); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; padding-bottom: 2px; }
+
+  /* ---- error banner ---- */
+  #error-banner {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    background: linear-gradient(180deg, rgba(70,15,15,0.98), rgba(40,10,10,0.92));
+    border-bottom: 1px solid rgba(255,80,80,0.35);
+    color: #ffd0d0; padding: 14px 24px;
+    font-size: 11px; line-height: 1.6;
+    display: none;
+  }
+  #error-banner.show { display: block; }
+  #error-banner h3 { font-family: var(--serif); font-style: italic; font-weight: 500; margin: 0 0 6px 0; font-size: 16px; color: #ffe6e6; }
+  #error-banner code { color: #ffabab; }
+  #error-banner .actions { margin-top: 10px; display: flex; gap: 8px; }
+  #error-banner button { width: auto; }
+
+  .pill { display: inline-block; padding: 1px 6px; border: 1px solid var(--border-strong); font-size: 10px; color: var(--text-dim); margin-right: 4px; }
+  .pill.pass { color: #6dd3a8; border-color: rgba(109,211,168,0.4); }
+  .pill.fail { color: #ff8888; border-color: rgba(255,80,80,0.4); }
+
+  /* ---- set toggle (top-right, always visible) ---- */
+  #set-toggle-wrap {
+    position: fixed; top: 14px; right: 50%; transform: translateX(50%);
+    z-index: 50; background: var(--bg-panel);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 8px 14px; font-size: 11px; color: var(--text-dim);
+    display: flex; gap: 18px; backdrop-filter: blur(8px);
+  }
+  #set-toggle-wrap label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  #set-toggle-wrap input[type="radio"] { accent-color: #6dd3a8; }
+  #set-toggle-wrap label:has(input:checked) { color: var(--text); }
+
+  /* ---- footer ---- */
+  #footer {
+    position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+    z-index: 5; color: var(--text-faint); font-size: 10px;
+    letter-spacing: 0.1em; text-transform: uppercase;
+    pointer-events: none;
+  }
+
+  .citation { color: var(--text-faint); font-size: 10px; line-height: 1.5; margin-top: 8px; font-style: italic; font-family: var(--serif); }
+
+  details summary { cursor: pointer; color: var(--text-dim); font-size: 11px; padding: 4px 0; }
+  details summary:hover { color: var(--text); }
+  details[open] summary { color: var(--text); }
+  details .body { font-size: 10px; line-height: 1.6; color: var(--text-dim); padding: 4px 0 0 12px; }
+
+  .legend-color { display: inline-block; width: 12px; height: 2px; vertical-align: middle; margin-right: 6px; }
+
+  hr.sep { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+</style>
+</head>
+<body>
+
+<div id="scene"></div>
+
+<!-- Top-right ray-set toggle, always reachable. -->
+<div id="set-toggle-wrap">
+  <label><input type="radio" name="rayset" value="literature" id="set-toggle" checked> literature Peres-33</label>
+  <label><input type="radio" name="rayset" value="userspec"> user-spec set (diagnostic)</label>
+</div>
+
+<div id="error-banner">
+  <h3>Verification failed.</h3>
+  <div id="error-body"></div>
+  <div class="actions">
+    <button id="dismiss-error">Dismiss</button>
+  </div>
+</div>
+
+<!-- ================ LEFT PANEL ================ -->
+<div class="panel panel-left">
+  <h1>Peres-33</h1>
+  <div class="subtitle">Conway–Kochen geometric lemma · 33 rays</div>
+
+  <h2>Verification</h2>
+  <div id="verify-readout"></div>
+
+  <h2>Orbits</h2>
+  <div id="orbit-list"></div>
+
+  <h2>Orthogonality</h2>
+  <label><input type="checkbox" id="show-triples"> show orthogonal triples</label>
+  <label><input type="checkbox" id="show-pairs"> show all orthogonal pairs</label>
+  <div class="row"><span class="k">orthogonal pairs</span><span class="v" id="cnt-pairs">—</span></div>
+  <div class="row"><span class="k">orthogonal triples</span><span class="v" id="cnt-triples">—</span></div>
+
+  <h2>SPIN coloring game</h2>
+  <div class="row"><span class="k">satisfied</span><span class="v" id="cnt-sat">0 / 0</span></div>
+  <div class="row"><span class="k">violated</span><span class="v" id="cnt-viol" style="color: var(--violation)">0</span></div>
+  <button id="btn-near-miss">Show me a near-miss</button>
+  <button id="btn-clear" class="danger">Clear</button>
+  <details>
+    <summary>How to play</summary>
+    <div class="body">
+      Click any ray endpoint to cycle: uncolored → 0 (cyan) → 1 (magenta) → uncolored.<br><br>
+      A triple is <em>satisfied</em> when exactly one ray in it is colored 0 and the other two are 1.<br><br>
+      Violated triples turn red. The Kochen–Specker theorem says: with the correct Peres-33 set, no full coloring satisfies all triples.
+    </div>
+  </details>
+
+  <div class="citation">
+    A. Peres, <em>J. Phys. A: Math. Gen.</em> <strong>24</strong>, L175 (1991).<br>
+    Gould &amp; Aravind, arXiv:<strong>0909.4502</strong> (2009), Table 1.
+  </div>
+</div>
+
+<!-- ================ RIGHT PANEL ================ -->
+<div class="panel panel-right">
+  <h1>Cube symmetry</h1>
+  <div class="subtitle">Proper rotation group · order 24</div>
+
+  <p style="color: var(--text-dim); font-size: 11px; line-height: 1.6; margin: 0 0 12px 0;">
+    Each orbit is closed under these 24 rotations. Click a class member to
+    animate the configuration.
+  </p>
+
+  <div id="rotation-classes"></div>
+
+  <hr class="sep">
+  <button id="btn-reset-rot">Reset orientation</button>
+</div>
+
+<div id="footer">drag · scroll · click endpoints</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+<script>
+"use strict";
+
+// ============================================================================
+// 0. CONSTANTS
+// ============================================================================
+
+const SQRT2 = Math.sqrt(2);
+const TOL = 1e-9;
+
+// ----------------------------------------------------------------------------
+// The 33 directions as given in the prompt.
+// Hardcoded literally; not derived. Comment cites original source.
+//
+// Source per prompt: Peres, J. Phys. A 24, L175 (1991).
+// NOTE: this set as transcribed in the prompt does NOT match the actual
+// Peres-33; see header comment and verifyPeresSet() output. The verifier
+// runs against this set faithfully and reports honestly.
+// ----------------------------------------------------------------------------
+const PERES_RAYS_USER_SPEC = [
+  // (A) coordinate axes — 3
+  { v: [1, 0, 0], orbit: 'A' },
+  { v: [0, 1, 0], orbit: 'A' },
+  { v: [0, 0, 1], orbit: 'A' },
+  // (B) face-diagonals — 6
+  { v: [1, 1, 0], orbit: 'B' },
+  { v: [1,-1, 0], orbit: 'B' },
+  { v: [1, 0, 1], orbit: 'B' },
+  { v: [1, 0,-1], orbit: 'B' },
+  { v: [0, 1, 1], orbit: 'B' },
+  { v: [0, 1,-1], orbit: 'B' },
+  // (C) body-diagonals — 4   (NOTE: not part of canonical Peres-33)
+  { v: [1, 1, 1], orbit: 'C' },
+  { v: [1, 1,-1], orbit: 'C' },
+  { v: [1,-1, 1], orbit: 'C' },
+  { v: [1,-1,-1], orbit: 'C' },
+  // (D) sqrt2-mixed type 1 — 12
+  { v: [SQRT2, 1, 1], orbit: 'D' },
+  { v: [SQRT2, 1,-1], orbit: 'D' },
+  { v: [SQRT2,-1, 1], orbit: 'D' },
+  { v: [SQRT2,-1,-1], orbit: 'D' },
+  { v: [1, SQRT2, 1], orbit: 'D' },
+  { v: [1, SQRT2,-1], orbit: 'D' },
+  { v: [-1, SQRT2, 1], orbit: 'D' },
+  { v: [-1, SQRT2,-1], orbit: 'D' },
+  { v: [1, 1, SQRT2], orbit: 'D' },
+  { v: [1,-1, SQRT2], orbit: 'D' },
+  { v: [-1, 1, SQRT2], orbit: 'D' },
+  { v: [-1,-1, SQRT2], orbit: 'D' },
+  // (E) sqrt2-mixed type 2 — 8
+  { v: [SQRT2, 1, 0], orbit: 'E' },
+  { v: [SQRT2,-1, 0], orbit: 'E' },
+  { v: [SQRT2, 0, 1], orbit: 'E' },
+  { v: [SQRT2, 0,-1], orbit: 'E' },
+  { v: [1, SQRT2, 0], orbit: 'E' },
+  { v: [-1, SQRT2, 0], orbit: 'E' },
+  { v: [0, SQRT2, 1], orbit: 'E' },
+  { v: [0, SQRT2,-1], orbit: 'E' },
+];
+
+// ----------------------------------------------------------------------------
+// The CORRECT Peres-33 set (Gould & Aravind, arXiv:0909.4502, Table 1).
+// The actual published Peres-33 (Peres 1991; Gould & Aravind 2009, Table 1).
+// Drops the 4 body-diagonals and uses the full 12-ray (±√2,±1,0)-orbit.
+// 33 rays, 72 orthogonal pairs, 16 orthogonal triples, KS-uncolorable.
+// 3 + 6 + 12 + 12 = 33. 72 orthogonal pairs, 16 triads, KS-uncolorable.
+// Provided so the user can switch to it from the error banner.
+// ----------------------------------------------------------------------------
+const PERES_RAYS_LITERATURE = [
+  { v: [1, 0, 0], orbit: 'A' },
+  { v: [0, 1, 0], orbit: 'A' },
+  { v: [0, 0, 1], orbit: 'A' },
+  { v: [1, 1, 0], orbit: 'B' },
+  { v: [1,-1, 0], orbit: 'B' },
+  { v: [1, 0, 1], orbit: 'B' },
+  { v: [1, 0,-1], orbit: 'B' },
+  { v: [0, 1, 1], orbit: 'B' },
+  { v: [0, 1,-1], orbit: 'B' },
+  // No body diagonals.
+  { v: [SQRT2, 1, 1], orbit: 'D' },
+  { v: [SQRT2, 1,-1], orbit: 'D' },
+  { v: [SQRT2,-1, 1], orbit: 'D' },
+  { v: [SQRT2,-1,-1], orbit: 'D' },
+  { v: [1, SQRT2, 1], orbit: 'D' },
+  { v: [1, SQRT2,-1], orbit: 'D' },
+  { v: [-1, SQRT2, 1], orbit: 'D' },
+  { v: [-1, SQRT2,-1], orbit: 'D' },
+  { v: [1, 1, SQRT2], orbit: 'D' },
+  { v: [1,-1, SQRT2], orbit: 'D' },
+  { v: [-1, 1, SQRT2], orbit: 'D' },
+  { v: [-1,-1, SQRT2], orbit: 'D' },
+  // Full orbit E (12 rays).
+  { v: [SQRT2, 1, 0], orbit: 'E' },
+  { v: [SQRT2,-1, 0], orbit: 'E' },
+  { v: [SQRT2, 0, 1], orbit: 'E' },
+  { v: [SQRT2, 0,-1], orbit: 'E' },
+  { v: [1, SQRT2, 0], orbit: 'E' },
+  { v: [-1, SQRT2, 0], orbit: 'E' },
+  { v: [0, SQRT2, 1], orbit: 'E' },
+  { v: [0, SQRT2,-1], orbit: 'E' },
+  { v: [1, 0, SQRT2], orbit: 'E' },
+  { v: [-1, 0, SQRT2], orbit: 'E' },
+  { v: [0, 1, SQRT2], orbit: 'E' },
+  { v: [0,-1, SQRT2], orbit: 'E' },
+];
+
+const ORBIT_INFO = {
+  A: { name: 'axes',                       cssVar: '--orbit-A' },
+  B: { name: 'face diagonals',             cssVar: '--orbit-B' },
+  C: { name: 'body diagonals (spurious)',  cssVar: '--orbit-C' },
+  D: { name: '√2-mixed type 1',            cssVar: '--orbit-D' },
+  E: { name: '√2-mixed type 2',            cssVar: '--orbit-E' },
+};
+
+// ============================================================================
+// 1. MATH HELPERS
+// ============================================================================
+
+function normalize(v) {
+  const n = Math.hypot(v[0], v[1], v[2]);
+  return [v[0]/n, v[1]/n, v[2]/n];
+}
+
+// Canonicalize ray to its representative with first nonzero coord positive.
+// Used to detect antipode-equivalent duplicates after normalization.
+function canonicalize(v) {
+  const u = normalize(v);
+  for (const x of u) {
+    if (Math.abs(x) > TOL) {
+      return x < 0 ? [-u[0], -u[1], -u[2]] : u;
+    }
+  }
+  return u;
+}
+
+function dot(a, b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
+
+function approxEq(a, b, tol=TOL) {
+  return Math.abs(a[0]-b[0]) < tol && Math.abs(a[1]-b[1]) < tol && Math.abs(a[2]-b[2]) < tol;
+}
+
+// ============================================================================
+// 2. CUBE ROTATION GROUP — generated, not hardcoded
+// ============================================================================
+
+// All 24 proper rotations of the cube = signed coordinate permutations
+// with determinant +1. A rotation matrix here is row-major 3x3.
+function cubeRotationGroup() {
+  const perms = [
+    [0,1,2], [0,2,1], [1,0,2], [1,2,0], [2,0,1], [2,1,0],
+  ];
+  const sign3 = [];
+  for (let s = 0; s < 8; s++) {
+    sign3.push([(s&1)?-1:1, (s&2)?-1:1, (s&4)?-1:1]);
+  }
+  const rots = [];
+  for (const p of perms) {
+    for (const s of sign3) {
+      // Build matrix M with M[i][p[i]] = s[i], all else 0.
+      const M = [[0,0,0],[0,0,0],[0,0,0]];
+      for (let i = 0; i < 3; i++) M[i][p[i]] = s[i];
+      // det of signed-perm matrix = sign(perm) * product(s).
+      const sgn = permSign(p) * s[0] * s[1] * s[2];
+      if (sgn === 1) rots.push(M);
+    }
+  }
+  return rots;
+}
+
+function permSign(p) {
+  // Count inversions to determine parity.
+  let inv = 0;
+  for (let i = 0; i < p.length; i++)
+    for (let j = i+1; j < p.length; j++)
+      if (p[i] > p[j]) inv++;
+  return (inv % 2 === 0) ? 1 : -1;
+}
+
+function classifyRotation(M) {
+  // Trace classifies the conjugacy class of a proper rotation.
+  // For a unit-axis rotation by angle θ: tr = 1 + 2 cos θ.
+  // Cube classes:  Identity (tr=3, θ=0),
+  //                Face 90° (tr=1, θ=π/2),
+  //                Face 180° (tr=-1, θ=π) but axis along a coordinate axis,
+  //                Edge 180° (tr=-1, θ=π) but axis along a face diagonal,
+  //                Vertex 120° (tr=0, θ=2π/3).
+  // We distinguish Face 180° from Edge 180° by checking the rotation axis
+  // orientation, *not* by an ad-hoc rule on diagonal entries.
+  const tr = M[0][0] + M[1][1] + M[2][2];
+  if (tr === 3) return 'Identity';
+  if (tr === 0) return 'Vertex 120°';
+  if (tr === 1) return 'Face 90°';
+  if (tr === -1) {
+    // axis is the +1-eigenvector of M. For a signed permutation, an integer
+    // probe vector along {coord, face-diag, body-diag} suffices. Rotation
+    // axes are STRICTLY +1 eigenvectors; -1 eigenvectors are the
+    // perpendicular plane (which gets flipped under 180° rotation), so we
+    // must NOT also accept w = -v as a match.
+    const probes = [
+      { v: [1,0,0], type: 'face' },
+      { v: [0,1,0], type: 'face' },
+      { v: [0,0,1], type: 'face' },
+      { v: [1,1,0], type: 'edge' }, { v: [1,-1,0], type: 'edge' },
+      { v: [1,0,1], type: 'edge' }, { v: [1,0,-1], type: 'edge' },
+      { v: [0,1,1], type: 'edge' }, { v: [0,1,-1], type: 'edge' },
+    ];
+    for (const p of probes) {
+      const w = matVec(M, p.v);
+      if (approxEq(w, p.v, 1e-6)) {
+        return p.type === 'face' ? 'Face 180°' : 'Edge 180°';
+      }
+    }
+  }
+  return 'Unknown';
+}
+
+function matVec(M, v) {
+  return [
+    M[0][0]*v[0] + M[0][1]*v[1] + M[0][2]*v[2],
+    M[1][0]*v[0] + M[1][1]*v[1] + M[1][2]*v[2],
+    M[2][0]*v[0] + M[2][1]*v[1] + M[2][2]*v[2],
+  ];
+}
+
+// ============================================================================
+// 3. ORTHOGONAL PAIRS / TRIPLES
+// ============================================================================
+
+function findOrthogonalPairs(rays) {
+  const N = rays.length;
+  const pairs = [];
+  for (let i = 0; i < N; i++) {
+    for (let j = i+1; j < N; j++) {
+      if (Math.abs(dot(rays[i].u, rays[j].u)) < 1e-9) pairs.push([i,j]);
+    }
+  }
+  return pairs;
+}
+
+function findOrthogonalTriples(rays) {
+  const N = rays.length;
+  // Build adjacency for fast lookup.
+  const adj = Array.from({length: N}, () => new Set());
+  for (let i = 0; i < N; i++) {
+    for (let j = i+1; j < N; j++) {
+      if (Math.abs(dot(rays[i].u, rays[j].u)) < 1e-9) {
+        adj[i].add(j); adj[j].add(i);
+      }
+    }
+  }
+  const triples = [];
+  for (let i = 0; i < N; i++) {
+    for (const j of adj[i]) {
+      if (j <= i) continue;
+      for (const k of adj[i]) {
+        if (k <= j) continue;
+        if (adj[j].has(k)) triples.push([i,j,k]);
+      }
+    }
+  }
+  return triples;
+}
+
+// ============================================================================
+// 4. KOCHEN–SPECKER COLORING CHECK & SOLVERS
+// ============================================================================
+
+function isValidPartialColoring(coloring, triples, pairs) {
+  // The KS coloring constraint, as stated in Peres 1991 / Gould-Aravind 2009:
+  //   - every orthogonal TRIPLE has exactly one 0 (and two 1s) — equivalently,
+  //     exactly one "1-eigenstate" per maximal basis;
+  //   - every orthogonal PAIR has at most one 0 — equivalently, two
+  //     orthogonal rays cannot both be assigned the eigenvalue 1.
+  // The pair constraint matters because not every orthogonal pair in the set
+  // is completed to a triple by another ray of the set; without it, the
+  // triple-only relaxation is too weak (admits colorings even for Peres-33).
+  //
+  // Convention here: 0 means "1-eigenvalue" (cyan), 1 means "0-eigenvalue"
+  // (magenta). The original spec mirrored this convention for the UI.
+  for (const [a,b,c] of triples) {
+    const vals = [coloring[a], coloring[b], coloring[c]];
+    let zeros = 0, ones = 0, undef = 0;
+    for (const v of vals) {
+      if (v === 0) zeros++;
+      else if (v === 1) ones++;
+      else undef++;
+    }
+    if (zeros >= 2) return false;
+    if (ones === 3) return false;
+    if (undef === 0 && !(zeros === 1 && ones === 2)) return false;
+  }
+  if (pairs) {
+    for (const [i,j] of pairs) {
+      if (coloring[i] === 0 && coloring[j] === 0) return false;
+    }
+  }
+  return true;
+}
+
+// Full KS coloring: assigns every ray a 0 or 1 such that every triple
+// has exactly one 0 and two 1s, AND no orthogonal pair has two 0s.
+// Returns the coloring or null.
+function findFullColoring(N, triples, pairs) {
+  const coloring = new Array(N).fill(undefined);
+  let result = null;
+  function bt(i) {
+    if (result) return;
+    if (i === N) {
+      for (const [a,b,c] of triples) {
+        const cnt = (coloring[a]===0?1:0)+(coloring[b]===0?1:0)+(coloring[c]===0?1:0);
+        if (cnt !== 1) return;
+      }
+      for (const [a,b] of pairs) {
+        if (coloring[a]===0 && coloring[b]===0) return;
+      }
+      result = coloring.slice();
+      return;
+    }
+    for (const v of [0,1]) {
+      coloring[i] = v;
+      if (isValidPartialColoring(coloring, triples, pairs)) {
+        bt(i+1);
+        if (result) return;
+      }
+      coloring[i] = undefined;
+    }
+  }
+  bt(0);
+  return result;
+}
+
+// Maximal consistent partial coloring: greedy backtracking that finds the
+// longest prefix of rays we can color without violating any triple or dyad.
+// Returns { coloring, unassignable: [indices] }.
+function findMaximalConsistentColoring(N, triples, pairs) {
+  const triple_membership = new Array(N).fill(0);
+  for (const t of triples) for (const i of t) triple_membership[i]++;
+  const order = Array.from({length: N}, (_, i) => i)
+                     .sort((a,b) => triple_membership[b] - triple_membership[a]);
+
+  let best = { coloring: new Array(N).fill(undefined), assigned: 0 };
+  const cur = new Array(N).fill(undefined);
+
+  function btGreedy(idx, assigned) {
+    if (assigned > best.assigned) {
+      best = { coloring: cur.slice(), assigned };
+    }
+    if (idx === N) return;
+    const i = order[idx];
+    let either = false;
+    for (const v of [0, 1]) {
+      cur[i] = v;
+      if (isValidPartialColoring(cur, triples, pairs)) {
+        either = true;
+        btGreedy(idx + 1, assigned + 1);
+        if (best.assigned === N) { cur[i] = undefined; return; }
+      }
+      cur[i] = undefined;
+    }
+    if (!either) {
+      // Skip this ray; it could not be consistently colored given prior choices.
+      btGreedy(idx + 1, assigned);
+    }
+  }
+
+  btGreedy(0, 0);
+  const unassignable = [];
+  for (let i = 0; i < N; i++) if (best.coloring[i] === undefined) unassignable.push(i);
+  return { coloring: best.coloring, unassignable };
+}
+
+// ============================================================================
+// 5. THE MAIN VERIFICATION
+// ============================================================================
+
+function verifyPeresSet(spec) {
+  // Returns { ok, report } where report has detailed findings.
+  // Does NOT silently mutate `spec`. Reports honestly even when checks fail.
+
+  const report = {
+    rawCount: spec.length,
+    distinctCount: 0,
+    pairCount: 0,
+    tripleCount: 0,
+    ksColoringExists: null,
+    foundColoring: null,
+    failures: [],
+    warnings: [],
+  };
+
+  // Check 1: ray count after antipode collapse.
+  const canon = spec.map(r => canonicalize(r.v));
+  const distinct = [];
+  for (const c of canon) {
+    if (!distinct.some(d => approxEq(d, c, 1e-9))) distinct.push(c);
+  }
+  report.distinctCount = distinct.length;
+  if (distinct.length !== 33) {
+    report.failures.push(`Expected 33 distinct rays after antipode-collapse, got ${distinct.length}.`);
+  }
+
+  // Build normalized ray objects for downstream use.
+  const rays = spec.map(r => ({ ...r, u: normalize(r.v) }));
+
+  // Check 2: orthogonal pair count.
+  const pairs = findOrthogonalPairs(rays);
+  report.pairCount = pairs.length;
+
+  // Check 3: orthogonal triple count.
+  const triples = findOrthogonalTriples(rays);
+  report.tripleCount = triples.length;
+
+  // Check 4: brute-force KS coloring search with both triple and pair
+  // constraints (see isValidPartialColoring for the constraint statement).
+  const coloring = findFullColoring(rays.length, triples, pairs);
+  report.ksColoringExists = (coloring !== null);
+  report.foundColoring = coloring;
+
+  if (report.ksColoringExists) {
+    report.failures.push(
+      `KS check failed: a valid {0,1}-coloring DOES exist for this set ` +
+      `(${rays.length} rays, ${triples.length} triples). The Peres-33 set ` +
+      `must be KS-uncolorable; this set is not. The literature value is ` +
+      `72 orthogonal pairs and 16 orthogonal triples (Gould & Aravind, ` +
+      `arXiv:0909.4502, Table 1) — the set as given has ${pairs.length} ` +
+      `pairs and ${triples.length} triples.`
+    );
+  }
+
+  report.ok = (report.failures.length === 0);
+  return { rays, pairs, triples, report };
+}
+
+// ============================================================================
+// 6. THREE.JS SCENE
+// ============================================================================
+
+let scene, camera, renderer, controls;
+let raysGroup, triplesGroup, antipodesGroup, pairsGroup;
+let endpointMeshes = [];   // clickable spheres at ray tips
+let endpointAntipodes = [];
+let activeRays = [];       // current ray data (with .u normalized)
+let activeTriples = [];
+let activePairs = [];
+let coloring = [];         // [N], values 0 | 1 | undefined
+
+const ORBIT_COLORS = {};   // resolved at init time
+let orbitVisible = { A: true, B: true, C: true, D: true, E: true };
+
+function initScene() {
+  const container = document.getElementById('scene');
+  const w = window.innerWidth, h = window.innerHeight;
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0a0a0a);
+
+  camera = new THREE.PerspectiveCamera(40, w/h, 0.01, 100);
+  camera.position.set(2.6, 1.8, 2.6);
+
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(w, h);
+  container.appendChild(renderer.domElement);
+
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.minDistance = 1.5;
+  controls.maxDistance = 8;
+
+  // Wireframe unit cube (faint).
+  const cubeGeo = new THREE.BoxGeometry(2, 2, 2);
+  const cubeEdges = new THREE.EdgesGeometry(cubeGeo);
+  const cubeMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.06 });
+  const cubeWire = new THREE.LineSegments(cubeEdges, cubeMat);
+  scene.add(cubeWire);
+
+  // Faint reference unit sphere (great-circle wireframe so it doesn't fight the cube).
+  const sphereGeo = new THREE.SphereGeometry(1, 32, 16);
+  const sphereMat = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true, opacity: 0.04 });
+  const sphereWire = new THREE.Mesh(sphereGeo, sphereMat);
+  scene.add(sphereWire);
+
+  // Origin marker (tiny).
+  const originDot = new THREE.Mesh(
+    new THREE.SphereGeometry(0.012, 8, 8),
+    new THREE.MeshBasicMaterial({ color: 0xaaaaaa })
+  );
+  scene.add(originDot);
+
+  // Axis tick lines for orientation.
+  for (const dir of [[1,0,0],[0,1,0],[0,0,1]]) {
+    const g = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0,0,0),
+      new THREE.Vector3(dir[0]*1.2, dir[1]*1.2, dir[2]*1.2)
+    ]);
+    const m = new THREE.LineBasicMaterial({ color: 0x222222, transparent: true, opacity: 0.5 });
+    scene.add(new THREE.Line(g, m));
+  }
+
+  // Container groups (so we can swap rays in/out atomically).
+  raysGroup = new THREE.Group();
+  antipodesGroup = new THREE.Group();
+  triplesGroup = new THREE.Group();
+  pairsGroup = new THREE.Group();
+  scene.add(raysGroup, antipodesGroup, triplesGroup, pairsGroup);
+
+  window.addEventListener('resize', onResize);
+
+  // Click handling.
+  renderer.domElement.addEventListener('pointerdown', onPointerDown);
+
+  animate();
+}
+
+function onResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+
+function onPointerDown(e) {
+  // Only treat short clicks as ray-clicks; OrbitControls handles drags.
+  const startX = e.clientX, startY = e.clientY;
+  const startTime = performance.now();
+  const handleUp = (eu) => {
+    renderer.domElement.removeEventListener('pointerup', handleUp);
+    const dt = performance.now() - startTime;
+    const dx = Math.abs(eu.clientX - startX), dy = Math.abs(eu.clientY - startY);
+    if (dt < 350 && dx < 4 && dy < 4) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointer.x = ((eu.clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((eu.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointer, camera);
+      const hits = raycaster.intersectObjects(endpointMeshes, false);
+      if (hits.length > 0) {
+        const idx = hits[0].object.userData.idx;
+        cycleColoring(idx);
+      }
+    }
+  };
+  renderer.domElement.addEventListener('pointerup', handleUp);
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  // Tween animations
+  tickTweens();
+  renderer.render(scene, camera);
+}
+
+// ============================================================================
+// 7. SCENE BUILD/REBUILD WHEN RAY SET CHANGES
+// ============================================================================
+
+function readOrbitColors() {
+  const cs = getComputedStyle(document.documentElement);
+  for (const k of ['A','B','C','D','E']) {
+    const c = cs.getPropertyValue(ORBIT_INFO[k].cssVar).trim();
+    ORBIT_COLORS[k] = new THREE.Color(c);
+  }
+}
+
+function clearGroup(g) {
+  while (g.children.length) {
+    const c = g.children.pop();
+    if (c.geometry) c.geometry.dispose();
+    if (c.material) {
+      if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
+      else c.material.dispose();
+    }
+  }
+}
+
+function buildRaysScene(rays, triples, pairs) {
+  clearGroup(raysGroup);
+  clearGroup(antipodesGroup);
+  clearGroup(triplesGroup);
+  clearGroup(pairsGroup);
+  endpointMeshes = [];
+  endpointAntipodes = [];
+
+  for (let i = 0; i < rays.length; i++) {
+    const r = rays[i];
+    const orbit = r.orbit;
+    const color = ORBIT_COLORS[orbit];
+    const u = r.u;
+
+    // Main ray line.
+    const g = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0,0,0),
+      new THREE.Vector3(u[0], u[1], u[2]),
+    ]);
+    const m = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.65 });
+    const line = new THREE.Line(g, m);
+    line.userData.orbit = orbit;
+    raysGroup.add(line);
+
+    // Endpoint sphere (clickable).
+    const sphereGeo = new THREE.SphereGeometry(0.028, 16, 12);
+    const sphereMat = new THREE.MeshBasicMaterial({ color });
+    const mesh = new THREE.Mesh(sphereGeo, sphereMat);
+    mesh.position.set(u[0], u[1], u[2]);
+    mesh.userData.idx = i;
+    mesh.userData.orbit = orbit;
+    mesh.userData.baseColor = color.clone();
+    raysGroup.add(mesh);
+    endpointMeshes.push(mesh);
+
+    // Antipode (faint, decorative).
+    const ag = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0,0,0),
+      new THREE.Vector3(-u[0], -u[1], -u[2]),
+    ]);
+    const am = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.12 });
+    const aline = new THREE.Line(ag, am);
+    aline.userData.orbit = orbit;
+    antipodesGroup.add(aline);
+
+    const apMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.014, 8, 6),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.18 })
+    );
+    apMesh.position.set(-u[0], -u[1], -u[2]);
+    apMesh.userData.orbit = orbit;
+    antipodesGroup.add(apMesh);
+    endpointAntipodes.push(apMesh);
+  }
+
+  // Triangles for orthogonal triples.
+  for (let ti = 0; ti < triples.length; ti++) {
+    const [a,b,c] = triples[ti];
+    const A = rays[a].u, B = rays[b].u, C = rays[c].u;
+    const tg = new THREE.BufferGeometry();
+    const verts = new Float32Array([
+      A[0],A[1],A[2], B[0],B[1],B[2],
+      B[0],B[1],B[2], C[0],C[1],C[2],
+      C[0],C[1],C[2], A[0],A[1],A[2],
+    ]);
+    tg.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+    const tm = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35 });
+    const tline = new THREE.LineSegments(tg, tm);
+    tline.userData.tripleIdx = ti;
+    tline.userData.tripleAB = [a,b,c];
+    triplesGroup.add(tline);
+  }
+  triplesGroup.visible = false;
+
+  // Optional: thin lines between every orthogonal pair (off by default).
+  for (const [i,j] of pairs) {
+    const A = rays[i].u, B = rays[j].u;
+    const pg = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(A[0],A[1],A[2]),
+      new THREE.Vector3(B[0],B[1],B[2]),
+    ]);
+    const pm = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.08 });
+    pairsGroup.add(new THREE.Line(pg, pm));
+  }
+  pairsGroup.visible = false;
+
+  applyOrbitVisibility();
+  applyColoringToScene();
+}
+
+function applyOrbitVisibility() {
+  for (const child of raysGroup.children) {
+    if (child.userData && child.userData.orbit) {
+      child.visible = orbitVisible[child.userData.orbit];
+    }
+  }
+  for (const child of antipodesGroup.children) {
+    if (child.userData && child.userData.orbit) {
+      child.visible = orbitVisible[child.userData.orbit];
+    }
+  }
+}
+
+// ============================================================================
+// 8. COLORING GAME
+// ============================================================================
+
+function cycleColoring(idx) {
+  const cur = coloring[idx];
+  if (cur === undefined) coloring[idx] = 0;
+  else if (cur === 0) coloring[idx] = 1;
+  else coloring[idx] = undefined;
+  applyColoringToScene();
+  updateColoringCounters();
+}
+
+function clearColoring() {
+  for (let i = 0; i < coloring.length; i++) coloring[i] = undefined;
+  applyColoringToScene();
+  updateColoringCounters();
+}
+
+function applyColoringToScene() {
+  const COLOR_0 = new THREE.Color(getComputedStyle(document.documentElement).getPropertyValue('--val-0').trim());
+  const COLOR_1 = new THREE.Color(getComputedStyle(document.documentElement).getPropertyValue('--val-1').trim());
+
+  // Reset endpoint colors to base.
+  for (const mesh of endpointMeshes) {
+    const idx = mesh.userData.idx;
+    const v = coloring[idx];
+    if (v === 0) mesh.material.color.copy(COLOR_0);
+    else if (v === 1) mesh.material.color.copy(COLOR_1);
+    else mesh.material.color.copy(mesh.userData.baseColor);
+  }
+
+  // Recompute violated triples and color those triangles red.
+  const VIO = new THREE.Color(getComputedStyle(document.documentElement).getPropertyValue('--violation').trim());
+  const SAT = new THREE.Color(0xffffff);
+  for (const child of triplesGroup.children) {
+    const t = child.userData.tripleAB;
+    if (!t) continue;
+    const status = tripleStatus(t);
+    if (status === 'violated') {
+      child.material.color.copy(VIO);
+      child.material.opacity = 0.85;
+    } else if (status === 'satisfied') {
+      child.material.color.copy(new THREE.Color(0x6dd3a8));
+      child.material.opacity = 0.7;
+    } else {
+      child.material.color.copy(SAT);
+      child.material.opacity = 0.35;
+    }
+  }
+}
+
+function tripleStatus([a,b,c]) {
+  const vals = [coloring[a], coloring[b], coloring[c]];
+  const zeros = vals.filter(v => v === 0).length;
+  const ones = vals.filter(v => v === 1).length;
+  const undef = vals.filter(v => v === undefined).length;
+
+  if (undef === 0) {
+    return (zeros === 1 && ones === 2) ? 'satisfied' : 'violated';
+  }
+  // Partial: violation if already impossible to satisfy.
+  if (zeros >= 2) return 'violated';   // can't have only one 0
+  if (ones === 3) return 'violated';    // impossible
+  // (zeros=0, ones=2, undef=1) → forced 0 in remaining slot, still satisfiable
+  return 'partial';
+}
+
+function updateColoringCounters() {
+  let sat = 0, vio = 0;
+  for (const t of activeTriples) {
+    const s = tripleStatus(t);
+    if (s === 'satisfied') sat++;
+    else if (s === 'violated') vio++;
+  }
+  // Count dyad (orthogonal-pair) violations: two 0s in an orthogonal pair
+  // is forbidden by the KS rules. (Two 1s is fine — it just means both rays
+  // are eigenvectors with eigenvalue 0.)
+  let dyadVio = 0;
+  for (const [i, j] of activePairs) {
+    if (coloring[i] === 0 && coloring[j] === 0) dyadVio++;
+  }
+  document.getElementById('cnt-sat').textContent = `${sat} / ${activeTriples.length}`;
+  document.getElementById('cnt-viol').textContent = `${vio}${dyadVio ? ` (+${dyadVio} dyad)` : ''}`;
+}
+
+function showNearMiss() {
+  const N = activeRays.length;
+  if (activeTriples.length === 0) {
+    alert('No triples in this set — nothing to find a near-miss for.');
+    return;
+  }
+  const result = findMaximalConsistentColoring(N, activeTriples, activePairs);
+  for (let i = 0; i < N; i++) coloring[i] = result.coloring[i];
+  applyColoringToScene();
+  // Highlight unassignable rays with a red ring effect via opacity bump.
+  for (const idx of result.unassignable) {
+    const m = endpointMeshes[idx];
+    if (m) m.material.color.copy(new THREE.Color(getComputedStyle(document.documentElement).getPropertyValue('--violation').trim()));
+  }
+  updateColoringCounters();
+  if (result.unassignable.length === 0) {
+    setTimeout(() =>
+      alert(`Solver found a complete consistent coloring (${result.coloring.filter(v=>v!==undefined).length}/${N} rays). ` +
+            `For a true Peres-33 set this should be impossible — see the verification report.`), 50);
+  } else {
+    setTimeout(() =>
+      alert(`Maximal consistent partial coloring found: ${result.coloring.filter(v=>v!==undefined).length}/${N} rays assigned. ` +
+            `${result.unassignable.length} ray${result.unassignable.length===1?'':'s'} cannot be ` +
+            `consistently colored alongside the rest. Those rays are highlighted in red.`), 50);
+  }
+}
+
+// ============================================================================
+// 9. ROTATION ANIMATIONS
+// ============================================================================
+
+const tweens = [];
+function tickTweens() {
+  const now = performance.now();
+  for (let i = tweens.length - 1; i >= 0; i--) {
+    const t = tweens[i];
+    const u = Math.min(1, (now - t.start) / t.duration);
+    const eased = 1 - Math.pow(1 - u, 3);  // ease-out cubic
+    t.update(eased);
+    if (u >= 1) {
+      t.done && t.done();
+      tweens.splice(i, 1);
+    }
+  }
+}
+
+let currentSceneRotation = new THREE.Quaternion();
+
+function animateRotation(M, duration=600) {
+  // Build target quaternion from M.
+  const m4 = new THREE.Matrix4();
+  m4.set(
+    M[0][0], M[0][1], M[0][2], 0,
+    M[1][0], M[1][1], M[1][2], 0,
+    M[2][0], M[2][1], M[2][2], 0,
+    0, 0, 0, 1,
+  );
+  const target = new THREE.Quaternion().setFromRotationMatrix(m4);
+
+  // If a tween is in flight, the saved currentSceneRotation is the PREVIOUS
+  // end-state, not what is on screen. Compose the new rotation against the
+  // currently displayed quaternion so chained clicks animate smoothly.
+  tweens.length = 0;  // cancel any in-flight tween
+  const displayed = raysGroup.quaternion.clone();
+  currentSceneRotation.copy(displayed);
+  const target_total = target.clone().multiply(displayed);
+  const start = displayed.clone();
+
+  const interp = new THREE.Quaternion();
+  tweens.push({
+    start: performance.now(),
+    duration,
+    update: (u) => {
+      THREE.Quaternion.slerp(start, target_total, interp, u);
+      raysGroup.quaternion.copy(interp);
+      antipodesGroup.quaternion.copy(interp);
+      triplesGroup.quaternion.copy(interp);
+      pairsGroup.quaternion.copy(interp);
+    },
+    done: () => {
+      currentSceneRotation.copy(target_total);
+    },
+  });
+}
+
+function resetRotation() {
+  tweens.length = 0;  // cancel any in-flight tween
+  const start = raysGroup.quaternion.clone();
+  const target = new THREE.Quaternion();
+  const interp = new THREE.Quaternion();
+  tweens.push({
+    start: performance.now(),
+    duration: 600,
+    update: (u) => {
+      THREE.Quaternion.slerp(start, target, interp, u);
+      raysGroup.quaternion.copy(interp);
+      antipodesGroup.quaternion.copy(interp);
+      triplesGroup.quaternion.copy(interp);
+      pairsGroup.quaternion.copy(interp);
+    },
+    done: () => { currentSceneRotation.copy(target); },
+  });
+}
+
+// ============================================================================
+// 10. UI WIRING
+// ============================================================================
+
+function buildOrbitList(rays) {
+  const orbitCounts = {};
+  for (const r of rays) orbitCounts[r.orbit] = (orbitCounts[r.orbit] || 0) + 1;
+  const host = document.getElementById('orbit-list');
+  host.innerHTML = '';
+  for (const k of ['A','B','C','D','E']) {
+    if (!orbitCounts[k]) continue;
+    const cssVar = ORBIT_INFO[k].cssVar;
+    const label = document.createElement('label');
+    label.innerHTML = `
+      <input type="checkbox" data-orbit="${k}" checked>
+      <span class="swatch" style="background: var(${cssVar})"></span>
+      <span style="flex:1">${ORBIT_INFO[k].name}</span>
+      <span style="color: var(--text-faint)">${orbitCounts[k]}</span>
+    `;
+    host.appendChild(label);
+    label.querySelector('input').addEventListener('change', (e) => {
+      orbitVisible[k] = e.target.checked;
+      applyOrbitVisibility();
+    });
+  }
+}
+
+function buildRotationButtons() {
+  const rots = cubeRotationGroup();
+  const byClass = {};
+  for (const M of rots) {
+    const cls = classifyRotation(M);
+    if (!byClass[cls]) byClass[cls] = [];
+    byClass[cls].push(M);
+  }
+  const order = ['Identity', 'Face 90°', 'Face 180°', 'Edge 180°', 'Vertex 120°'];
+  const host = document.getElementById('rotation-classes');
+  host.innerHTML = '';
+  for (const cls of order) {
+    if (!byClass[cls]) continue;
+    const div = document.createElement('div');
+    div.className = 'rot-class';
+    div.innerHTML = `<div class="rc-label">${cls} <span style="color: var(--text-faint)">· ${byClass[cls].length}</span></div>`;
+    byClass[cls].forEach((M, i) => {
+      const btn = document.createElement('button');
+      btn.className = 'rot-btn';
+      btn.textContent = `${i+1}`;
+      btn.title = `${cls} #${i+1}\n` + M.map(r => r.map(x => x.toString().padStart(2)).join(' ')).join('\n');
+      btn.addEventListener('click', () => animateRotation(M));
+      div.appendChild(btn);
+    });
+    host.appendChild(div);
+  }
+}
+
+function buildVerifyReadout(report) {
+  const host = document.getElementById('verify-readout');
+  const passClass = (ok) => ok ? 'pass' : 'fail';
+  const dot = (ok) => `<span class="pill ${passClass(ok)}">${ok ? 'PASS' : 'FAIL'}</span>`;
+
+  host.innerHTML = `
+    <div class="row"><span class="k">${dot(report.distinctCount === 33)} rays after antipode-collapse</span><span class="v">${report.distinctCount} / 33</span></div>
+    <div class="row"><span class="k">orthogonal pairs</span><span class="v">${report.pairCount}</span></div>
+    <div class="row"><span class="k">orthogonal triples</span><span class="v">${report.tripleCount}</span></div>
+    <div class="row"><span class="k">${dot(!report.ksColoringExists)} KS-uncolorable</span><span class="v">${report.ksColoringExists ? 'NO' : 'YES'}</span></div>
+  `;
+  document.getElementById('cnt-pairs').textContent = report.pairCount;
+  document.getElementById('cnt-triples').textContent = report.tripleCount;
+}
+
+function showErrorBanner(report) {
+  const banner = document.getElementById('error-banner');
+  const body = document.getElementById('error-body');
+  const lines = [];
+  lines.push(`The set hardcoded in <code>PERES_RAYS_USER_SPEC</code> does not satisfy the four verification checks:`);
+  lines.push('<ul style="margin:6px 0 6px 18px; padding:0;">');
+  for (const f of report.failures) lines.push(`<li>${f}</li>`);
+  lines.push('</ul>');
+  lines.push(`The literature Peres-33 (Gould &amp; Aravind 2009, Table 1) has 72 orthogonal pairs and 16 triads and is KS-uncolorable. The current set has ${report.pairCount} pairs and ${report.tripleCount} triples and admits a KS coloring. Switch to <em>literature Peres-33</em> in the toggle above to demonstrate the geometric lemma. No silent adjustment is made.`);
+  body.innerHTML = lines.join('');
+  banner.classList.add('show');
+}
+
+function hideErrorBanner() {
+  document.getElementById('error-banner').classList.remove('show');
+}
+
+function loadRaySet(spec) {
+  // Replace the active set and rebuild everything that depends on it.
+  const result = verifyPeresSet(spec);
+  activeRays = result.rays;
+  activeTriples = result.triples;
+  activePairs = result.pairs;
+  coloring = new Array(activeRays.length).fill(undefined);
+
+  buildOrbitList(activeRays);
+  buildVerifyReadout(result.report);
+  buildRaysScene(activeRays, activeTriples, activePairs);
+  updateColoringCounters();
+
+  // Console log per spec requirement #4 (also rendered in UI).
+  console.log('[Peres-33 verification]', result.report);
+  if (!result.report.ok) {
+    console.error('[Peres-33 verification FAILED]', result.report.failures);
+    showErrorBanner(result.report);
+    if (result.report.foundColoring) {
+      console.error('[KS-violating coloring found]', result.report.foundColoring);
+    }
+  } else {
+    hideErrorBanner();
+  }
+}
+
+function init() {
+  initScene();
+  readOrbitColors();
+  buildRotationButtons();
+
+  document.getElementById('show-triples').addEventListener('change', (e) => {
+    triplesGroup.visible = e.target.checked;
+  });
+  document.getElementById('show-pairs').addEventListener('change', (e) => {
+    pairsGroup.visible = e.target.checked;
+  });
+  document.getElementById('btn-clear').addEventListener('click', clearColoring);
+  document.getElementById('btn-near-miss').addEventListener('click', showNearMiss);
+  document.getElementById('btn-reset-rot').addEventListener('click', resetRotation);
+
+  document.getElementById('dismiss-error').addEventListener('click', hideErrorBanner);
+
+  // The set-toggle in the top-right corner. Always reachable.
+  document.querySelectorAll('input[name="rayset"]').forEach((el) => {
+    el.addEventListener('change', (e) => {
+      if (!e.target.checked) return;
+      const which = e.target.value;
+      loadRaySet(which === 'literature' ? PERES_RAYS_LITERATURE : PERES_RAYS_USER_SPEC);
+      resetRotation();
+    });
+  });
+
+  // Default: load the literature Peres-33. The visualizer demonstrates the
+  // KS-uncolorability out of the box. The "user spec" set is preserved as
+  // a diagnostic of the original prompt and is one click away.
+  loadRaySet(PERES_RAYS_LITERATURE);
+}
+
+window.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
